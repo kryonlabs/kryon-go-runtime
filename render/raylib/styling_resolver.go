@@ -330,7 +330,7 @@ func (r *RaylibRenderer) resolvePropertyInheritance() {
 			rootEl.ResolvedFontSize = initialFontSize
 			resolvedRootFontSize = initialFontSize
 		}
-		
+
 		// Resolve TextAlignment for root
 		// If TextAlignment was initialized to UnsetTextAlignmentSentinel and not set by style/direct,
 		// it inherits the app-level default. Otherwise, it uses its value (which might be LayoutAlignStart by base init).
@@ -380,10 +380,10 @@ func (r *RaylibRenderer) applyInheritanceRecursive(
 	// 3. TextAlignment
 	// If TextAlignment was initialized to UnsetTextAlignmentSentinel and not set by style/direct for 'el', inherit.
 	if el.TextAlignment == UnsetTextAlignmentSentinel {
-	   el.TextAlignment = inheritedTextAlignment
+		el.TextAlignment = inheritedTextAlignment
 	}
 	// Children inherit the now resolved el.TextAlignment
-	textAlignmentForChildren := el.TextAlignment 
+	textAlignmentForChildren := el.TextAlignment
 
 	for _, child := range el.Children {
 		r.applyInheritanceRecursive(child, fgColorForChildren, fontSizeForChildren, textAlignmentForChildren)
@@ -435,7 +435,7 @@ func (r *RaylibRenderer) ReResolveElementVisuals(el *render.RenderElement) {
 
 	if el.Parent != nil {
 		inheritedFgColor = r.getEffectiveInheritedFgColor(el.Parent)
-		
+
 		if el.Parent.ResolvedFontSize != 0.0 {
 			inheritedFontSize = el.Parent.ResolvedFontSize
 		} else { // Parent might also be unset, trace up for font size
@@ -444,12 +444,11 @@ func (r *RaylibRenderer) ReResolveElementVisuals(el *render.RenderElement) {
 		}
 		// For TextAlignment, parent's TextAlignment is its computed value.
 		// If parent's was UnsetTextAlignmentSentinel, it would have inherited.
-		inheritedTextAlignment = el.Parent.TextAlignment 
+		inheritedTextAlignment = el.Parent.TextAlignment
 		if el.Parent.TextAlignment == UnsetTextAlignmentSentinel { // Should not happen if parent was resolved
-		    log.Printf("WARN ReResolveVisuals: Parent '%s' TextAlignment is Unset. Using app default for inheritance.", el.Parent.SourceElementName)
-		    inheritedTextAlignment = r.config.DefaultFgColor.A // Typo: should be uint8(krb.LayoutAlignStart) or app default text align
+			log.Printf("WARN ReResolveVisuals: Parent '%s' TextAlignment is Unset. Using app default for inheritance.", el.Parent.SourceElementName)
+			inheritedTextAlignment = r.config.DefaultFgColor.A // Typo: should be uint8(krb.LayoutAlignStart) or app default text align
 		}
-
 
 	}
 
@@ -464,12 +463,11 @@ func (r *RaylibRenderer) ReResolveElementVisuals(el *render.RenderElement) {
 	if el.TextAlignment == UnsetTextAlignmentSentinel { // If still unset after style/direct
 		el.TextAlignment = inheritedTextAlignment
 	}
-    // If TextAlignment is still sentinel (e.g. root, no style/direct, and inherited was also sentinel - unlikely)
-    // default it to LayoutAlignStart as per spec.
-    if el.TextAlignment == UnsetTextAlignmentSentinel {
-        el.TextAlignment = uint8(krb.LayoutAlignStart)
-    }
-
+	// If TextAlignment is still sentinel (e.g. root, no style/direct, and inherited was also sentinel - unlikely)
+	// default it to LayoutAlignStart as per spec.
+	if el.TextAlignment == UnsetTextAlignmentSentinel {
+		el.TextAlignment = uint8(krb.LayoutAlignStart)
+	}
 
 	// Fallback for text-bearing elements if still unset.
 	if isTextBearing && el.FgColor.A == 0 {
@@ -512,15 +510,15 @@ func (r *RaylibRenderer) getEffectiveInheritedFgColor(el *render.RenderElement) 
 
 // Helper to get the FontSize an element would inherit (traces up if needed).
 func (r *RaylibRenderer) getEffectiveInheritedFontSize(el *render.RenderElement) float32 {
-    if el == nil {
-        return r.config.DefaultFontSize
-    }
-    ancestor := el
-    for ancestor != nil {
-        if ancestor.ResolvedFontSize != 0.0 {
-            return ancestor.ResolvedFontSize
-        }
-        ancestor = ancestor.Parent
-    }
-    return r.config.DefaultFontSize
+	if el == nil {
+		return r.config.DefaultFontSize
+	}
+	ancestor := el
+	for ancestor != nil {
+		if ancestor.ResolvedFontSize != 0.0 {
+			return ancestor.ResolvedFontSize
+		}
+		ancestor = ancestor.Parent
+	}
+	return r.config.DefaultFontSize
 }

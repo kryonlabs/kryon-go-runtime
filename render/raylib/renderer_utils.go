@@ -419,7 +419,6 @@ func resolveEventHandlers(doc *krb.Document, el *render.RenderElement) {
 	}
 }
 
-
 // FindStyleIDByName looks up a style's 1-based ID by its string name.
 // Returns 0 if not found.
 func FindStyleIDByName(doc *krb.Document, name string) uint8 {
