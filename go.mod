@@ -1,4 +1,4 @@
-module github.com/waozixyz/kryon/impl/go
+module github.com/kryonlabs/kryon-go-runtime
 
 go 1.23.5
 

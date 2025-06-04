@@ -7,8 +7,8 @@ import (
     "log"
     "os"
 
-    "github.com/waozixyz/kryon/impl/go/krb"
-    "github.com/waozixyz/kryon/impl/go/render"
+    "github.com/kryonlabs/kryon-go-runtime/go/krb"
+    "github.com/kryonlabs/kryon-go-runtime/go/render"
 
     // NOTE: NO direct import of specific renderers like raylib here!
 )

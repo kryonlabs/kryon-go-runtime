@@ -11,8 +11,8 @@ import (
 	//"strings" // Keep for PerformLayout logging condition
 
 	rl "github.com/gen2brain/raylib-go/raylib" // For rl.Blank in expandComponent, default colors
-	"github.com/waozixyz/kryon/impl/go/krb"
-	"github.com/waozixyz/kryon/impl/go/render"
+	"github.com/kryonlabs/kryon-go-runtime/go/krb"
+	"github.com/kryonlabs/kryon-go-runtime/go/render"
 )
 
 func (r *RaylibRenderer) PrepareTree(

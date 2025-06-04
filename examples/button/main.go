@@ -8,8 +8,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/waozixyz/kryon/impl/go/krb"
-	"github.com/waozixyz/kryon/impl/go/render/raylib"
+	"github.com/kryonlabs/kryon-go-runtime/go/krb"
+	"github.com/kryonlabs/kryon-go-runtime/go/render/raylib"
 )
 
 //go:embed button.krb

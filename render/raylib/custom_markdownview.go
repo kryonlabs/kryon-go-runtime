@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
-	"github.com/waozixyz/kryon/impl/go/krb"
-	"github.com/waozixyz/kryon/impl/go/render"
+	"github.com/kryonlabs/kryon-go-runtime/go/krb"
+	"github.com/kryonlabs/kryon-go-runtime/go/render"
 	// Markdown libraries...
 )
 

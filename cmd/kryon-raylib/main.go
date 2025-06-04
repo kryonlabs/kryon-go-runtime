@@ -8,9 +8,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/waozixyz/kryon/impl/go/krb"
-	"github.com/waozixyz/kryon/impl/go/render"
-	"github.com/waozixyz/kryon/impl/go/render/raylib" // Your Raylib renderer
+	"github.com/kryonlabs/kryon-go-runtime/go/krb"
+	"github.com/kryonlabs/kryon-go-runtime/go/render"
+	"github.com/kryonlabs/kryon-go-runtime/go/render/raylib" // Your Raylib renderer
 )
 
 // --- Global state (optional, could be passed around) ---
