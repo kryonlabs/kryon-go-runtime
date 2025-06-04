@@ -7,9 +7,9 @@ import (
 	_ "embed"
 	"log"
 
-	"github.com/kryonlabs/kryon-go-runtime/go/krb"
-	"github.com/kryonlabs/kryon-go-runtime/go/render"
-	kraylib "github.com/kryonlabs/kryon-go-runtime/go/render/raylib"
+	"github.com/kryonlabs/kryon-go-runtime/krb"
+	"github.com/kryonlabs/kryon-go-runtime/render"
+	kraylib "github.com/kryonlabs/kryon-go-runtime/render/raylib"
 )
 
 //go:embed tab_bar.krb

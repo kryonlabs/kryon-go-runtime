@@ -6,8 +6,8 @@ import (
 	"log"
 	"strings"
 
-	"github.com/kryonlabs/kryon-go-runtime/go/krb"
-	"github.com/kryonlabs/kryon-go-runtime/go/render"
+	"github.com/kryonlabs/kryon-go-runtime/krb"
+	"github.com/kryonlabs/kryon-go-runtime/render"
 )
 
 type TabBarHandler struct{}

@@ -2,7 +2,7 @@
 package render
 
 import (
-	"github.com/kryonlabs/kryon-go-runtime/go/krb"
+	"github.com/kryonlabs/kryon-go-runtime/krb"
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
 
