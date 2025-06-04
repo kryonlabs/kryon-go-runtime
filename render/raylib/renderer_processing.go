@@ -316,74 +316,76 @@ func findStyleIDByName(doc *krb.Document, name string) uint8 {
 	return 0
 }
 
-// func findStyleIDByName(doc *krb.Document, name string) uint8 { ... }
 func (r *RaylibRenderer) expandComponent(
-	instanceElement *render.RenderElement,
-	compDef *krb.KrbComponentDefinition,
-	allElements *[]render.RenderElement, // Pointer to the slice, so we can append/grow
-	nextMasterIndex *int, // Pointer to keep track of the next available global index
-	kryUsageChildren []*render.RenderElement, // Children passed in the KRY
+	instanceElement *render.RenderElement, // The placeholder element being replaced
+	compDef *krb.KrbComponentDefinition, // The definition of the component to expand
+	allElements *[]render.RenderElement, // Pointer to the global slice of all elements
+	nextMasterIndex *int, // Pointer to the next available global index for new elements
+	kryUsageChildren []*render.RenderElement, // Children passed to the component instance in KRY
 ) error {
-	doc := r.docRef // Use doc from renderer context
-
+	doc := r.docRef
 	compDefNameStr := getStringValueByIdxFallback(doc, compDef.NameIndex, "UnnamedComponentDef")
 
+	log.Printf("Debug expandComponent: Expanding instance '%s' (OrigIdx %d, NameIdx %d) with definition '%s'. Initial nextMasterIndex: %d",
+		instanceElement.SourceElementName, instanceElement.OriginalIndex, instanceElement.Header.ID, compDefNameStr, *nextMasterIndex)
+
 	if compDef.RootElementTemplateData == nil || len(compDef.RootElementTemplateData) == 0 {
-		log.Printf(
-			"Warn expandComponent: Component definition '%s' for instance '%s' has no RootElementTemplateData. Instance will have no template children.",
-			compDefNameStr,
-			instanceElement.SourceElementName,
-		)
-		instanceElement.Children = nil // Ensure children list is at least initialized if empty
-		// KRY-usage children slotting will be handled later even if template is empty.
-		// (Though without a template, there's no slot to find, so they'd likely be appended to instanceElement itself if it were a container, or ignored)
-		// For now, let's proceed to KRY children slotting, which might append to instanceElement.Children if it was made empty here.
-		// This should be fine, as slotting is the last step.
+		log.Printf("Warn expandComponent: CompDef '%s' for instance '%s' has no RootElementTemplateData.", compDefNameStr, instanceElement.SourceElementName)
+		// Slot KRY children directly to instance if no template and instance is a container
+		if len(kryUsageChildren) > 0 && instanceElement.Header.Type == krb.ElemTypeContainer {
+			log.Printf("Debug expandComponent: No template for '%s', appending %d KRY-usage children directly to instance.", instanceElement.SourceElementName, len(kryUsageChildren))
+			if instanceElement.Children == nil {
+				instanceElement.Children = make([]*render.RenderElement, 0, len(kryUsageChildren))
+			}
+			instanceElement.Children = append(instanceElement.Children, kryUsageChildren...)
+			for _, kryChild := range kryUsageChildren {
+				kryChild.Parent = instanceElement
+			}
+		}
+		return nil
 	}
 
 	templateReader := bytes.NewReader(compDef.RootElementTemplateData)
-	var templateRootsInThisExpansion []*render.RenderElement // Collects the root(s) of the just-expanded template
-	templateOffsetToGlobalIndex := make(map[uint32]int)      // Maps file offset within template data to global index in allElements
-	var templateChildInfos []struct {                        // To store child linking info for elements within this template
+
+	// Stores elements created *from this specific template expansion pass*.
+	// Key: offset within template data stream, Value: global index in allElements
+	localTemplateOffsetToGlobalIndex := make(map[uint32]int)
+
+	// Stores child linking information for elements *within this template*.
+	// parentGlobalIndex refers to an element created in this pass from this template.
+	var localTemplateChildInfos []struct {
 		parentGlobalIndex            int
 		childRefs                    []krb.ChildRef
-		parentHeaderOffsetInTemplate uint32
+		parentHeaderOffsetInTemplate uint32 // Offset of parent's header in template data stream
 	}
 
-	// Default visual properties for template elements (can be overridden by template's own style/props)
-	defaultFgColor := rl.RayWhite // Fallback if not specified
-	defaultBorderColor := rl.Gray // Fallback
-	defaultTextAlignment := uint8(krb.LayoutAlignStart)
-	defaultIsVisible := true
-	templateDataStreamOffset := uint32(0) // Tracks current read position in templateReader
+	var currentTemplateRootGlobalIndex = -1 // Global index of the root element of THIS template expansion
+	templateDataStreamOffset := uint32(0)
+	elementsCreatedInThisExpansionPass := 0
 
-	// Loop to read and create elements from the template data stream
+	// --- PASS 1: Create RenderElements from this template's data. Handle nested expansions. ---
 	for templateReader.Len() > 0 {
-		currentElementOffsetInTemplate := templateDataStreamOffset
+		currentElementHeaderOffsetInTemplate := templateDataStreamOffset
 		headerBuf := make([]byte, krb.ElementHeaderSize)
 		n, err := templateReader.Read(headerBuf)
-
 		if err == io.EOF {
-			break // End of template data
+			break
 		}
 		if err != nil || n < krb.ElementHeaderSize {
-			return fmt.Errorf(
-				"expandComponent '%s': failed to read template element header for '%s': %w (read %d bytes)",
-				compDefNameStr, instanceElement.SourceElementName, err, n,
-			)
+			return fmt.Errorf("expandComponent '%s' for instance '%s': failed to read template element header: %w (read %d bytes)", compDefNameStr, instanceElement.SourceElementName, err, n)
 		}
 		templateDataStreamOffset += uint32(n)
+		elementsCreatedInThisExpansionPass++
 
-		// Deserialize header from template data
 		templateKrbHeader := krb.ElementHeader{
 			Type:            krb.ElementType(headerBuf[0]),
-			ID:              headerBuf[1], // ID from template, might be for slotting
+			ID:              headerBuf[1],
 			PosX:            krb.ReadU16LE(headerBuf[2:4]),
 			PosY:            krb.ReadU16LE(headerBuf[4:6]),
 			Width:           krb.ReadU16LE(headerBuf[6:8]),
 			Height:          krb.ReadU16LE(headerBuf[8:10]),
 			Layout:          headerBuf[10],
-			StyleID:         headerBuf[11], // StyleID from template definition
+			StyleID:         headerBuf[11],
 			PropertyCount:   headerBuf[12],
 			ChildCount:      headerBuf[13],
 			EventCount:      headerBuf[14],
@@ -394,50 +396,48 @@ func (r *RaylibRenderer) expandComponent(
 		newElGlobalIndex := *nextMasterIndex
 		(*nextMasterIndex)++
 
-		// Grow the allElements slice if needed
+		// Grow allElements slice if needed
 		if newElGlobalIndex >= cap(*allElements) {
-			newCap := cap(*allElements)*2 + 20 // Grow generously
+			newCap := cap(*allElements)*2 + 20 // Or other growth strategy
 			tempSlice := make([]render.RenderElement, len(*allElements), newCap)
 			copy(tempSlice, *allElements)
 			*allElements = tempSlice
 		}
-		// Extend the length of the slice if newElGlobalIndex is at the current end
+		// Ensure slice has enough length
 		if newElGlobalIndex >= len(*allElements) {
 			*allElements = (*allElements)[:newElGlobalIndex+1]
 		}
 
-		newEl := &(*allElements)[newElGlobalIndex] // Get a pointer to the element in the main slice
-		newEl.OriginalIndex = newElGlobalIndex     // This is its global index in the flat r.elements list
-		newEl.Header = templateKrbHeader           // Start with template's header
+		newEl := &(*allElements)[newElGlobalIndex] // This is the RenderElement created from the template
+		newEl.OriginalIndex = newElGlobalIndex
+		newEl.Header = templateKrbHeader
 		newEl.DocRef = doc
-		newEl.BgColor = rl.Blank // Default: transparent, to be filled by style/direct
-		newEl.FgColor = defaultFgColor
-		newEl.BorderColor = defaultBorderColor
-		newEl.BorderWidths = [4]uint8{0, 0, 0, 0}
-		newEl.Padding = [4]uint8{0, 0, 0, 0}
-		newEl.TextAlignment = defaultTextAlignment
-		newEl.IsVisible = defaultIsVisible
+		newEl.BgColor = rl.Blank
+		newEl.FgColor = rl.Blank
+		newEl.BorderColor = rl.Blank
+		newEl.BorderWidths = [4]uint8{}
+		newEl.Padding = [4]uint8{}
+		newEl.TextAlignment = UnsetTextAlignmentSentinel // Use sentinel for inheritance check
+		newEl.IsVisible = true
 		newEl.ResourceIndex = render.InvalidResourceIndex
 		newEl.IsInteractive = (templateKrbHeader.Type == krb.ElemTypeButton || templateKrbHeader.Type == krb.ElemTypeInput)
-		templateOffsetToGlobalIndex[currentElementOffsetInTemplate] = newElGlobalIndex
 
-		// Set SourceElementName for the new template element
+		localTemplateOffsetToGlobalIndex[currentElementHeaderOffsetInTemplate] = newElGlobalIndex
+
 		templateElIdStr, _ := getStringValueByIdx(doc, templateKrbHeader.ID)
-		if templateElIdStr != "" {
-			newEl.SourceElementName = templateElIdStr
-		} else {
+		newEl.SourceElementName = templateElIdStr
+		if newEl.SourceElementName == "" {
 			newEl.SourceElementName = fmt.Sprintf("TplElem_Type0x%X_Idx%d_In_%s", templateKrbHeader.Type, newEl.OriginalIndex, compDefNameStr)
 		}
 
-		// Read and store direct properties from template (to be applied after style)
 		var templateDirectProps []krb.Property
 		if templateKrbHeader.PropertyCount > 0 {
 			templateDirectProps = make([]krb.Property, templateKrbHeader.PropertyCount)
-			propHeaderBuf := make([]byte, 3) // Property header: ID, ValueType, Size
+			propHeaderBuf := make([]byte, 3) // ID(1), ValueType(1), Size(1)
 			for j := uint8(0); j < templateKrbHeader.PropertyCount; j++ {
 				nProp, errProp := templateReader.Read(propHeaderBuf)
 				if errProp != nil || nProp < 3 {
-					return fmt.Errorf("expandComponent '%s': failed to read template property header for '%s': %w", compDefNameStr, newEl.SourceElementName, errProp)
+					return fmt.Errorf("expandComp '%s': read prop header for '%s': %w", compDefNameStr, newEl.SourceElementName, errProp)
 				}
 				templateDataStreamOffset += uint32(nProp)
 				prop := &templateDirectProps[j]
@@ -448,23 +448,23 @@ func (r *RaylibRenderer) expandComponent(
 					prop.Value = make([]byte, prop.Size)
 					nVal, errVal := templateReader.Read(prop.Value)
 					if errVal != nil || nVal < int(prop.Size) {
-						return fmt.Errorf("expandComponent '%s': failed to read template property value for '%s': %w", compDefNameStr, newEl.SourceElementName, errVal)
+						return fmt.Errorf("expandComp '%s': read prop value for '%s': %w", compDefNameStr, newEl.SourceElementName, errVal)
 					}
 					templateDataStreamOffset += uint32(nVal)
 				}
 			}
 		}
 
-		// Read and process custom properties from template
-		var nestedComponentName string // If this template element itself is a nested component
+		var nestedComponentNameForThisNewEl string
 		if templateKrbHeader.CustomPropCount > 0 {
-			customPropHeaderBuf := make([]byte, 3) // KeyIndex, ValueType, Size
+			customPropHeaderBuf := make([]byte, 3) // KeyIndex(1), ValueType(1), Size(1)
 			for j := uint8(0); j < templateKrbHeader.CustomPropCount; j++ {
 				nCustomProp, errCustomProp := templateReader.Read(customPropHeaderBuf)
 				if errCustomProp != nil || nCustomProp < 3 {
-					return fmt.Errorf("expandComponent '%s': failed to read template custom property header for '%s': %w", compDefNameStr, newEl.SourceElementName, errCustomProp)
+					return fmt.Errorf("expandComp '%s': read custom prop header for '%s': %w", compDefNameStr, newEl.SourceElementName, errCustomProp)
 				}
 				templateDataStreamOffset += uint32(nCustomProp)
+
 				cpropKeyIndex := customPropHeaderBuf[0]
 				cpropValueType := krb.ValueType(customPropHeaderBuf[1])
 				cpropSize := customPropHeaderBuf[2]
@@ -473,121 +473,79 @@ func (r *RaylibRenderer) expandComponent(
 					cpropValue = make([]byte, cpropSize)
 					nVal, errVal := templateReader.Read(cpropValue)
 					if errVal != nil || nVal < int(cpropSize) {
-						return fmt.Errorf("expandComponent '%s': failed to read template custom property value for '%s': %w", compDefNameStr, newEl.SourceElementName, errVal)
+						return fmt.Errorf("expandComp '%s': read custom prop value for '%s': %w", compDefNameStr, newEl.SourceElementName, errVal)
 					}
 					templateDataStreamOffset += uint32(nVal)
 				}
 
 				keyName, keyOk := getStringValueByIdx(doc, cpropKeyIndex)
 				if keyOk && keyName == componentNameConventionKey {
-					if (cpropValueType == krb.ValTypeString || cpropValueType == krb.ValTypeResource) && cpropSize == 1 {
+					if (cpropValueType == krb.ValTypeString || cpropValueType == krb.ValTypeResource) && cpropSize == 1 && len(cpropValue) == 1 {
 						valueIndex := cpropValue[0]
 						if strVal, strOk := getStringValueByIdx(doc, valueIndex); strOk {
-							nestedComponentName = strVal
-							newEl.SourceElementName = nestedComponentName // Update name to nested component's name
-							// This newEl will be further expanded if it's a nested component.
+							nestedComponentNameForThisNewEl = strVal
 						}
 					}
 				}
-				// Note: Other custom properties on template elements are currently not stored on RenderElement.
-				// If needed, RenderElement would need a CustomProperties field, and these would be parsed and stored.
 			}
 		}
 
-		// --- Styling and Property Application for `newEl` ---
-		if len(templateRootsInThisExpansion) == 0 { // This 'newEl' is the root of the template being expanded
-			templateRootsInThisExpansion = append(templateRootsInThisExpansion, newEl)
-			newEl.Parent = instanceElement // Link expanded root to the original component instance element
+		// Apply styling and properties based on whether it's template root or child
+		if currentTemplateRootGlobalIndex == -1 { // This is the first element from template data stream
+			currentTemplateRootGlobalIndex = newElGlobalIndex
+			newEl.Parent = instanceElement // Its parent is the instance element being expanded
+			log.Printf("Debug expandComponent [%s for %s]: Template root '%s' (GlobalIdx %d) created. Parent set to instance '%s' (GlobalIdx %d).",
+				compDefNameStr, instanceElement.SourceElementName, newEl.SourceElementName, newEl.OriginalIndex, instanceElement.SourceElementName, instanceElement.OriginalIndex)
 
-			log.Printf(
-				"Debug expandComponent [%s for %s]: Applying instance props to template root '%s' (GlobalIdx %d)",
-				compDefNameStr, instanceElement.SourceElementName, newEl.SourceElementName, newEl.OriginalIndex,
-			)
-
-			// Override template root's Header fields with instance's values
-			newEl.Header.ID = instanceElement.Header.ID // ID comes from instance usage <Comp id="X">
+			// Apply instance's (placeholder) properties TO this template root
+			newEl.Header.ID = instanceElement.Header.ID // ID from <Comp id="X">
 			newEl.Header.PosX = instanceElement.Header.PosX
 			newEl.Header.PosY = instanceElement.Header.PosY
-			newEl.Header.Width = instanceElement.Header.Width   // KRY <Comp width=X> passed to instance
-			newEl.Header.Height = instanceElement.Header.Height // KRY <Comp height=X> passed to instance
-			newEl.Header.Layout = instanceElement.Header.Layout
-			newEl.SourceElementName = instanceElement.SourceElementName // Overall name comes from instance
+			newEl.Header.Width = instanceElement.Header.Width   // from <Comp width=X>
+			newEl.Header.Height = instanceElement.Header.Height // from <Comp height=Y>
+			newEl.Header.Layout = instanceElement.Header.Layout // from <Comp layout=...> or its style
 
-			// Enhanced StyleID resolution for the template root
-			var resolvedStyleIDForTemplateRoot uint8 = 0
-			// 1. Check for component-specific style property (e.g., "bar_style" for TabBar)
-			if compDefNameStr == "TabBar" {
-				barStyleNameVal, barStyleNameFound := GetCustomPropertyValue(instanceElement, "bar_style", doc)
-				if barStyleNameFound && barStyleNameVal != "" {
-					resolvedStyleIDForTemplateRoot = findStyleIDByName(doc, barStyleNameVal)
-					if resolvedStyleIDForTemplateRoot == 0 {
-						log.Printf("Warn expandComponent: Style '%s' from 'bar_style' for TabBar instance '%s' not found.", barStyleNameVal, instanceElement.SourceElementName)
-					} else {
-						log.Printf("Debug expandComponent: Using StyleID %d ('%s') from 'bar_style' for TabBar '%s'.", resolvedStyleIDForTemplateRoot, barStyleNameVal, instanceElement.SourceElementName)
-					}
-				}
-			}
-			// TODO: Add similar checks for other components if they have conventional style properties like "card_style", "dialog_style", etc.
-
-			// 2. If not found via component-specific prop, check instanceElement's direct StyleID (from <Comp style="xxx">)
-			if resolvedStyleIDForTemplateRoot == 0 && instanceElement.Header.StyleID != 0 {
-				resolvedStyleIDForTemplateRoot = instanceElement.Header.StyleID
-				log.Printf("Debug expandComponent: Using StyleID %d from instanceElement's direct 'style' attribute for '%s'.", resolvedStyleIDForTemplateRoot, instanceElement.SourceElementName)
+			if instanceElement.SourceElementName != "" { // Instance's name (often from its ID) takes precedence
+				newEl.SourceElementName = instanceElement.SourceElementName
 			}
 
-			// 3. If still not found, use the StyleID from the template data itself (if the template's root was defined with a style in KRY Define)
-			if resolvedStyleIDForTemplateRoot == 0 && templateKrbHeader.StyleID != 0 { // templateKrbHeader.StyleID is from template's root
-				resolvedStyleIDForTemplateRoot = templateKrbHeader.StyleID
-				log.Printf("Debug expandComponent: Using StyleID %d from component definition's template root for '%s'.", resolvedStyleIDForTemplateRoot, instanceElement.SourceElementName)
+			// StyleID for template root: Precedence is instance's style, then template's default.
+			resolvedStyleIDForTplRoot := instanceElement.Header.StyleID // Style from <Comp style="X">
+			if resolvedStyleIDForTplRoot == 0 && templateKrbHeader.StyleID != 0 {
+				resolvedStyleIDForTplRoot = templateKrbHeader.StyleID // Style from Define Comp { RootElement { style: "Y" } }
 			}
+			newEl.Header.StyleID = resolvedStyleIDForTplRoot
 
-			if resolvedStyleIDForTemplateRoot != 0 {
-				newEl.Header.StyleID = resolvedStyleIDForTemplateRoot
+			// Apply the resolved style to newEl (the template root)
+			if style, found := findStyle(doc, newEl.Header.StyleID); found {
+				r.applyStylePropertiesToElement(style.Properties, doc, newEl)
 			}
-			// End of Enhanced StyleID resolution
-
-			// Apply the resolved style (if any) to newEl (the template root)
-			if currentStyle, currentStyleFound := findStyle(doc, newEl.Header.StyleID); currentStyleFound {
-				r.applyStylePropertiesToElement(currentStyle.Properties, doc, newEl)
-				log.Printf("   Applied style ID %d (Name: '%s') to template root '%s'.", newEl.Header.StyleID, getStringValueByIdxFallback(doc, currentStyle.NameIndex, "UnknownStyle"), newEl.SourceElementName)
-			} else if newEl.Header.StyleID != 0 {
-				log.Printf("   Warn expandComponent: StyleID %d for template root '%s' (instance of '%s') not found.", newEl.Header.StyleID, newEl.SourceElementName, compDefNameStr)
-			}
-
-			// Apply direct KRB properties from instanceElement to newEl (overriding style)
-			if doc != nil && instanceElement.OriginalIndex >= 0 && instanceElement.OriginalIndex < len(doc.Properties) && len(doc.Properties[instanceElement.OriginalIndex]) > 0 {
+			// Apply direct KRB properties from instanceElement's original KRB entry
+			// These are standard KRB properties, not "Custom Properties" for component logic.
+			if instanceElement.OriginalIndex >= 0 && instanceElement.OriginalIndex < len(doc.Properties) && len(doc.Properties[instanceElement.OriginalIndex]) > 0 {
 				r.applyDirectPropertiesToElement(doc.Properties[instanceElement.OriginalIndex], doc, newEl)
-				log.Printf("   Applied direct KRB properties from instance '%s' to template root '%s'.", instanceElement.SourceElementName, newEl.SourceElementName)
 			}
-
-			// Contextual defaults after style and direct props applied to the template root
-			r.applyContextualDefaults(newEl)
-
-			// Resolve text/image which might come from the (now applied) instance style or direct props
-			currentStyleForNewEl, currentStyleFoundForNewEl := findStyle(doc, newEl.Header.StyleID)
-			r.resolveElementTextAndImage(doc, newEl, currentStyleForNewEl, currentStyleFoundForNewEl)
-
-		} else { // This 'newEl' is a child *within* the template structure, not the root
-			// Apply style from template's definition (templateKrbHeader.StyleID)
-			templateChildStyle, templateChildStyleFound := findStyle(doc, templateKrbHeader.StyleID)
-			if templateChildStyleFound {
+		} else { // This `newEl` is a non-root element *within* the template structure
+			// Apply style from template's own definition (templateKrbHeader.StyleID)
+			if templateChildStyle, templateChildStyleFound := findStyle(doc, templateKrbHeader.StyleID); templateChildStyleFound {
 				r.applyStylePropertiesToElement(templateChildStyle.Properties, doc, newEl)
 			}
-			// Apply direct properties defined on this element within the template
+			// Apply direct properties defined on this element *within the template itself*
 			r.applyDirectPropertiesToElement(templateDirectProps, doc, newEl)
-			// Apply contextual defaults for this template child
-			r.applyContextualDefaults(newEl)
-			// Resolve text/image for this template child
-			r.resolveElementTextAndImage(doc, newEl, templateChildStyle, templateChildStyleFound)
 		}
 
-		// Read Event Handlers from template (these are part of the component's definition)
+		// Common post-style/direct-prop steps
+		r.applyContextualDefaults(newEl)
+		styleForNewEl, styleFoundForNewEl := findStyle(doc, newEl.Header.StyleID)
+		r.resolveElementTextAndImage(doc, newEl, styleForNewEl, styleFoundForNewEl)
+
+		// Event Handlers defined IN THE TEMPLATE (e.g. a static button inside a component)
 		if templateKrbHeader.EventCount > 0 {
 			eventDataSize := int(templateKrbHeader.EventCount) * krb.EventFileEntrySize
 			eventBuf := make([]byte, eventDataSize)
 			nEvent, errEvent := templateReader.Read(eventBuf)
 			if errEvent != nil || nEvent < eventDataSize {
-				return fmt.Errorf("expandComponent '%s': failed to read template event block for '%s': %w", compDefNameStr, newEl.SourceElementName, errEvent)
+				return fmt.Errorf("expandComp '%s': read template event block for '%s': %w", compDefNameStr, newEl.SourceElementName, errEvent)
 			}
 			templateDataStreamOffset += uint32(nEvent)
 			newEl.EventHandlers = make([]render.EventCallbackInfo, templateKrbHeader.EventCount)
@@ -598,169 +556,188 @@ func (r *RaylibRenderer) expandComponent(
 				if handlerName, ok := getStringValueByIdx(doc, callbackID); ok {
 					newEl.EventHandlers[k] = render.EventCallbackInfo{EventType: eventType, HandlerName: handlerName}
 				} else {
-					log.Printf("Warn expandComponent: Template element '%s' has invalid event callback string index %d.", newEl.SourceElementName, callbackID)
+					log.Printf("Warn expandComponent: Template element '%s' (GlobalIdx %d) has invalid event callback string index %d.", newEl.SourceElementName, newEl.OriginalIndex, callbackID)
 				}
 			}
 		}
 
-		// Skip Animation Refs from template (not currently processed into RenderElement)
+		// Skip Animation Refs from template data stream
 		if templateKrbHeader.AnimationCount > 0 {
 			animRefDataSize := int(templateKrbHeader.AnimationCount) * krb.AnimationRefSize
 			bytesSkipped, errAnim := templateReader.Seek(int64(animRefDataSize), io.SeekCurrent)
 			if errAnim != nil || bytesSkipped < int64(animRefDataSize) {
-				return fmt.Errorf("expandComponent '%s': failed to seek past template animation refs for '%s': %w", compDefNameStr, newEl.SourceElementName, errAnim)
+				return fmt.Errorf("expandComp '%s': seek past template anim refs for '%s': %w", compDefNameStr, newEl.SourceElementName, errAnim)
 			}
 			templateDataStreamOffset += uint32(animRefDataSize)
 		}
 
-		// Read Child Refs from template (to be linked later within this template expansion)
+		// Read and store Child Ref info for Pass 2 (linking children within this template)
 		if templateKrbHeader.ChildCount > 0 {
-			templateChildRefs := make([]krb.ChildRef, templateKrbHeader.ChildCount)
+			tplChildRefs := make([]krb.ChildRef, templateKrbHeader.ChildCount)
 			childRefDataSize := int(templateKrbHeader.ChildCount) * krb.ChildRefSize
 			childRefBuf := make([]byte, childRefDataSize)
 			nChildRef, errChildRef := templateReader.Read(childRefBuf)
 			if errChildRef != nil || nChildRef < childRefDataSize {
-				return fmt.Errorf("expandComponent '%s': failed to read template child refs for '%s': %w", compDefNameStr, newEl.SourceElementName, errChildRef)
+				return fmt.Errorf("expandComp '%s': read template child refs for '%s': %w", compDefNameStr, newEl.SourceElementName, errChildRef)
 			}
 			templateDataStreamOffset += uint32(nChildRef)
 			for k := uint8(0); k < templateKrbHeader.ChildCount; k++ {
 				offset := int(k) * krb.ChildRefSize
-				templateChildRefs[k] = krb.ChildRef{ChildOffset: krb.ReadU16LE(childRefBuf[offset : offset+krb.ChildRefSize])}
+				tplChildRefs[k] = krb.ChildRef{ChildOffset: krb.ReadU16LE(childRefBuf[offset : offset+krb.ChildRefSize])}
 			}
-			templateChildInfos = append(templateChildInfos, struct {
+			localTemplateChildInfos = append(localTemplateChildInfos, struct {
 				parentGlobalIndex            int
 				childRefs                    []krb.ChildRef
 				parentHeaderOffsetInTemplate uint32
 			}{
 				parentGlobalIndex:            newElGlobalIndex,
-				childRefs:                    templateChildRefs,
-				parentHeaderOffsetInTemplate: currentElementOffsetInTemplate,
+				childRefs:                    tplChildRefs,
+				parentHeaderOffsetInTemplate: currentElementHeaderOffsetInTemplate,
 			})
 		}
 
-		// If this template element is itself a nested component, expand it recursively.
-		// newEl is the placeholder *within the current component's template* for the nested component.
-		// kryUsageChildren for a nested component defined *inside another component's template* is typically nil,
-		// unless the KRY `Define` syntax allows passing children to nested template components, which is advanced.
-		if nestedComponentName != "" {
-			nestedCompDef := r.findComponentDefinition(nestedComponentName)
+		// Recursive expansion for nested components defined within this template
+		if nestedComponentNameForThisNewEl != "" {
+			nestedCompDef := r.findComponentDefinition(nestedComponentNameForThisNewEl)
 			if nestedCompDef != nil {
-				log.Printf(
-					"Debug expandComponent: Expanding nested component '%s' for template element '%s' (GlobalIdx: %d) within component '%s'",
-					nestedComponentName, newEl.SourceElementName, newEl.OriginalIndex, compDefNameStr,
-				)
-				// Pass newEl (the placeholder for the nested component) as the 'instanceElement' for the recursive call.
-				// Children for this nested instance usually come from *its own* template definition, not from the outer component's KRY usage.
-				err_nested := r.expandComponent(newEl, nestedCompDef, allElements, nextMasterIndex, nil /* kryUsageChildren for nested is nil */)
+				log.Printf("Debug expandComponent: Recursively expanding NESTED component '%s' (placeholder is '%s', GlobalIdx %d) within outer component '%s'",
+					nestedComponentNameForThisNewEl, newEl.SourceElementName, newEl.OriginalIndex, compDefNameStr)
+
+				newEl.IsExpandedAsNestedComponent = true
+				// `newEl` is the placeholder *within the current component's template* for the nested component.
+				// KRY-usage children for a component defined *inside another component's template* are typically nil,
+				// unless the KRY `Define` syntax allows passing children to such nested template components (advanced feature).
+				err_nested := r.expandComponent(newEl, nestedCompDef, allElements, nextMasterIndex, nil /* No KRY-usage children for this nested instance */)
 				if err_nested != nil {
-					return fmt.Errorf(
-						"expandComponent '%s': failed to expand nested component '%s' (for '%s'): %w",
-						compDefNameStr, nestedComponentName, newEl.SourceElementName, err_nested,
-					)
+					return fmt.Errorf("expandComponent '%s': failed during nested expansion of '%s' (for '%s'): %w", compDefNameStr, nestedComponentNameForThisNewEl, newEl.SourceElementName, err_nested)
 				}
 			} else {
-				log.Printf("Warn expandComponent: Nested component definition '%s' for template element '%s' (within '%s') not found.",
-					nestedComponentName, newEl.SourceElementName, compDefNameStr)
+				log.Printf("Warn expandComponent: Nested CompDef '%s' not found (for placeholder '%s', GlobalIdx %d in '%s').",
+					nestedComponentNameForThisNewEl, newEl.SourceElementName, newEl.OriginalIndex, compDefNameStr)
 			}
 		}
-	} // End of loop reading elements from template data
+	} // End PASS 1 (creating RenderElements from this template's data stream)
 
-	// Link children within the just-expanded template structure
-	for _, info := range templateChildInfos {
-		parentEl := &(*allElements)[info.parentGlobalIndex]
-		// Skip if this parent's children were already linked (e.g., by a nested component expansion that used it as an instance)
-		if len(parentEl.Children) > 0 && parentEl.Children[0].Parent == parentEl {
-			// This check assumes that if children are present and their parent pointer is correct,
-			// they were set by a deeper recursive call to expandComponent.
-			// Might need refinement if a component can be an instance AND have its own template children defined.
+	log.Printf("Debug expandComponent [%s for %s]: Pass 1 created %d elements from template. nextMasterIndex is now: %d",
+		compDefNameStr, instanceElement.SourceElementName, elementsCreatedInThisExpansionPass, *nextMasterIndex)
+
+	// --- PASS 2: Link children *within* the structure just created from THIS template. ---
+	// This loop iterates over the `localTemplateChildInfos` which were collected for elements defined *in this current template*.
+	for _, info := range localTemplateChildInfos {
+		// `parentElFromThisTemplate` is an element that was created from `compDef.RootElementTemplateData` in Pass 1.
+		parentElFromThisTemplate := &(*allElements)[info.parentGlobalIndex]
+
+		// If `parentElFromThisTemplate` was itself a placeholder for a *nested component* (e.g., `HabitTabBar` used inside `HabitHeader`),
+		// its `Children` array would have been populated by the recursive call to `expandComponent` for that nested component.
+		// In that case, we should NOT overwrite its children here with `childRefs` from its usage site *within the outer template*.
+		// The `childRefs` for `parentElFromThisTemplate` (if it were a simple container in the template) define ITS children,
+		// not children to be passed INTO it if it's a component instance.
+		if parentElFromThisTemplate.IsExpandedAsNestedComponent { // Need a flag like this
+			log.Printf("Debug expandComponent [%s for %s]: Template element '%s' (GlobalIdx %d) was expanded as a nested component. Skipping its direct child ref linking from this pass, its children are from its own template.",
+				compDefNameStr, instanceElement.SourceElementName, parentElFromThisTemplate.SourceElementName, parentElFromThisTemplate.OriginalIndex)
 			continue
 		}
+		// If newEl.IsExpandedAsNestedComponent is not available, use a heuristic:
+		// if parentElFromThisTemplate.Children is already non-nil and non-empty,
+		// and those children correctly point back to it, assume it was handled by a nested expansion.
+		if parentElFromThisTemplate.Children != nil && len(parentElFromThisTemplate.Children) > 0 {
+			isLikelyNestedExpansion := true
+			for _, child := range parentElFromThisTemplate.Children {
+				if child.Parent != parentElFromThisTemplate {
+					isLikelyNestedExpansion = false
+					break
+				}
+			}
+			if isLikelyNestedExpansion {
+				log.Printf("Debug expandComponent [%s for %s]: Template element '%s' (GlobalIdx %d) children already set (heuristic: likely nested expansion). Skipping its direct child ref linking from this pass.",
+					compDefNameStr, instanceElement.SourceElementName, parentElFromThisTemplate.SourceElementName, parentElFromThisTemplate.OriginalIndex)
+				continue
+			}
+		}
 
-		parentEl.Children = make([]*render.RenderElement, 0, len(info.childRefs))
+		// Initialize/clear children for `parentElFromThisTemplate` before linking its template-defined children.
+		parentElFromThisTemplate.Children = make([]*render.RenderElement, 0, len(info.childRefs))
+
 		for _, childRef := range info.childRefs {
-			// ChildOffset in KRB template is relative to the parent element's header *within that template data*
-			childAbsoluteOffsetInTemplate := info.parentHeaderOffsetInTemplate + uint32(childRef.ChildOffset)
-			childGlobalIndex, found := templateOffsetToGlobalIndex[childAbsoluteOffsetInTemplate]
+			// `childRef.ChildOffset` is relative to `parentHeaderOffsetInTemplate` within the template data stream.
+			childAbsoluteOffsetInTemplateStream := info.parentHeaderOffsetInTemplate + uint32(childRef.ChildOffset)
+			childGlobalIndex, found := localTemplateOffsetToGlobalIndex[childAbsoluteOffsetInTemplateStream]
 			if !found {
-				log.Printf("Error expandComponent '%s': Child for '%s' (GlobalIdx %d) at template offset %d (abs %d) not found in map. Parent template offset %d, child relative offset %d",
-					compDefNameStr, parentEl.SourceElementName, parentEl.OriginalIndex,
-					childRef.ChildOffset, childAbsoluteOffsetInTemplate, info.parentHeaderOffsetInTemplate, childRef.ChildOffset)
+				log.Printf("Error expandComponent '%s': Child for template element '%s' (GlobalIdx %d) at template offset %d (abs %d) not found in local map.",
+					compDefNameStr, parentElFromThisTemplate.SourceElementName, parentElFromThisTemplate.OriginalIndex, childRef.ChildOffset, childAbsoluteOffsetInTemplateStream)
 				continue
 			}
-			childEl := &(*allElements)[childGlobalIndex]
+			childElFromThisTemplate := &(*allElements)[childGlobalIndex]
 
-			if childEl.Parent != nil && childEl.Parent != parentEl { // Check if already parented by someone else unexpectedly
-				log.Printf("Warn expandComponent: Template child '%s' (GlobalIdx %d) already has parent '%s' (GlobalIdx %d). Cannot set new parent '%s' (GlobalIdx %d).",
-					childEl.SourceElementName, childEl.OriginalIndex,
-					childEl.Parent.SourceElementName, childEl.Parent.OriginalIndex,
-					parentEl.SourceElementName, parentEl.OriginalIndex)
-				continue
-			}
-			childEl.Parent = parentEl
-			parentEl.Children = append(parentEl.Children, childEl)
+			// Link this child (from the template) to its parent (also from the template)
+			childElFromThisTemplate.Parent = parentElFromThisTemplate
+			parentElFromThisTemplate.Children = append(parentElFromThisTemplate.Children, childElFromThisTemplate)
 		}
+		log.Printf("Debug expandComponent [%s for %s]: Pass 2 linked %d children to template element '%s' (GlobalIdx %d).",
+			compDefNameStr, instanceElement.SourceElementName, len(parentElFromThisTemplate.Children), parentElFromThisTemplate.SourceElementName, parentElFromThisTemplate.OriginalIndex)
 	}
 
-	// Set the children of the original instanceElement to be the root(s) found in this template expansion.
-	// The instanceElement conceptually "becomes" its template's root structure.
+	// --- Finalize `instanceElement` (the original placeholder) ---
+	// The `instanceElement` is "replaced" by the root of the expanded template.
+	// Its `Children` should now point to the root element(s) created from this template expansion.
 	if instanceElement != nil {
-		instanceElement.Children = make([]*render.RenderElement, 0, len(templateRootsInThisExpansion))
-		for _, rootTplEl := range templateRootsInThisExpansion {
-			if rootTplEl.Parent == instanceElement { // Double check parentage established earlier
-				instanceElement.Children = append(instanceElement.Children, rootTplEl)
-			} else {
-				log.Printf("Error expandComponent '%s': Template root '%s' (GlobalIdx %d) has unexpected parent '%s' (GlobalIdx %d), expected instance '%s'.",
-					compDefNameStr, rootTplEl.SourceElementName, rootTplEl.OriginalIndex,
-					rootTplEl.Parent.SourceElementName, rootTplEl.Parent.OriginalIndex,
-					instanceElement.SourceElementName,
-				)
+		if currentTemplateRootGlobalIndex != -1 { // Check if a template root was actually identified/created
+			rootOfExpandedTemplate := &(*allElements)[currentTemplateRootGlobalIndex]
+
+			// In Pass 1, rootOfExpandedTemplate.Parent was set to instanceElement.
+			// Now, set instanceElement.Children to be this single root.
+			instanceElement.Children = []*render.RenderElement{rootOfExpandedTemplate}
+			log.Printf("Debug expandComponent [%s for %s]: Instance '%s' (GlobalIdx %d) children array now points to template root '%s' (GlobalIdx %d).",
+				compDefNameStr, instanceElement.SourceElementName, instanceElement.SourceElementName, instanceElement.OriginalIndex, rootOfExpandedTemplate.SourceElementName, rootOfExpandedTemplate.OriginalIndex)
+		} else {
+			// This case (no template root from a non-empty template data) should be rare if parsing is correct.
+			// If KRY-usage children were directly added earlier due to empty template, instanceElement.Children might already be set.
+			log.Printf("Debug expandComponent [%s for %s]: No template root was identified for instance '%s'. Its children might be from KRY-usage or nil.",
+				compDefNameStr, instanceElement.SourceElementName, instanceElement.SourceElementName)
+			if instanceElement.Children == nil { // Ensure it's at least an empty slice
+				instanceElement.Children = make([]*render.RenderElement, 0)
 			}
 		}
 	}
 
-	// Slot KRY-usage children (children defined at the component's usage site in KRY)
-	// These are children of `instanceElement` *before* expansion.
-	// After expansion, `instanceElement.Children` now points to the template's root(s).
-	// We need to find the slot *within the expanded template structure*.
+	// --- Slot KRY-usage children into the expanded template structure ---
 	if len(kryUsageChildren) > 0 {
 		slotFound := false
-		var slotElement *render.RenderElement // The element in the template marked as children_host
+		var slotElement *render.RenderElement
 
-		// Search for the slot within the newly expanded children of instanceElement
-		queue := make([]*render.RenderElement, 0, len(instanceElement.Children))
-		if instanceElement.Children != nil {
-			queue = append(queue, instanceElement.Children...) // Start search from template roots
-		}
-		visitedInSearch := make(map[*render.RenderElement]bool)
+		// Search for the slot within the structure rooted at `instanceElement.Children[0]` (which is the template's root)
+		if instanceElement != nil && len(instanceElement.Children) > 0 {
+			searchStartNode := instanceElement.Children[0] // This is the root of the expanded template
+			queue := []*render.RenderElement{searchStartNode}
+			visitedInSearch := make(map[*render.RenderElement]bool)
 
-		for len(queue) > 0 {
-			currentSearchNode := queue[0]
-			queue = queue[1:]
-			if visitedInSearch[currentSearchNode] {
-				continue
-			}
-			visitedInSearch[currentSearchNode] = true
+			for len(queue) > 0 {
+				currentNodeToSearch := queue[0]
+				queue = queue[1:]
+				if visitedInSearch[currentNodeToSearch] {
+					continue
+				}
+				visitedInSearch[currentNodeToSearch] = true
 
-			// ID for slot is from template's definition (currentSearchNode.Header.ID)
-			idName, _ := getStringValueByIdx(doc, currentSearchNode.Header.ID)
-			if idName == childrenSlotIDName {
-				slotElement = currentSearchNode
-				slotFound = true
-				break
-			}
-			if currentSearchNode.Children != nil { // Traverse deeper into template structure
-				for _, childOfSearchNode := range currentSearchNode.Children {
-					if !visitedInSearch[childOfSearchNode] {
-						queue = append(queue, childOfSearchNode)
+				idNameFromTemplate, _ := getStringValueByIdx(doc, currentNodeToSearch.Header.ID) // ID is from template element
+				if idNameFromTemplate == childrenSlotIDName {                                    // childrenSlotIDName is "children_host"
+					slotElement = currentNodeToSearch
+					slotFound = true
+					break
+				}
+				if currentNodeToSearch.Children != nil {
+					for _, childOfSearchNode := range currentNodeToSearch.Children {
+						if !visitedInSearch[childOfSearchNode] {
+							queue = append(queue, childOfSearchNode)
+						}
 					}
 				}
 			}
 		}
 
 		if slotFound && slotElement != nil {
-			log.Printf("expandComponent '%s': Found slot '%s' (GlobalIdx %d) in template. Re-parenting %d KRY-usage children.",
-				instanceElement.SourceElementName, childrenSlotIDName, slotElement.OriginalIndex, len(kryUsageChildren))
-			// Append KRY usage children to the slot. Ensure slot's children slice is initialized.
+			log.Printf("Debug expandComponent [%s for %s]: Found slot '%s' (GlobalIdx %d) in expanded template. Attaching %d KRY-usage children.",
+				compDefNameStr, instanceElement.SourceElementName, childrenSlotIDName, slotElement.OriginalIndex, len(kryUsageChildren))
 			if slotElement.Children == nil {
 				slotElement.Children = make([]*render.RenderElement, 0, len(kryUsageChildren))
 			}
@@ -769,30 +746,34 @@ func (r *RaylibRenderer) expandComponent(
 				kryChild.Parent = slotElement // Re-parent KRY children to the slot
 			}
 		} else {
-			log.Printf("Warn expandComponent '%s': No slot '%s' found in template. Appending %d KRY-usage children to first template root (if any).",
-				instanceElement.SourceElementName, childrenSlotIDName, len(kryUsageChildren))
-			if len(instanceElement.Children) > 0 { // instanceElement.Children are the template roots now
+			log.Printf("Warn expandComponent [%s for %s]: No slot '%s' found in expanded template. Attempting to append %d KRY-usage children to first template root (if any and is container).",
+				compDefNameStr, instanceElement.SourceElementName, childrenSlotIDName, len(kryUsageChildren))
+			if instanceElement != nil && len(instanceElement.Children) > 0 {
 				firstRootInTemplate := instanceElement.Children[0]
-				if firstRootInTemplate.Children == nil {
-					firstRootInTemplate.Children = make([]*render.RenderElement, 0, len(kryUsageChildren))
-				}
-				firstRootInTemplate.Children = append(firstRootInTemplate.Children, kryUsageChildren...)
-				for _, kryChild := range kryUsageChildren {
-					kryChild.Parent = firstRootInTemplate
+				// Only append if the template root is a type that can host children (e.g., Container)
+				if firstRootInTemplate.Header.Type == krb.ElemTypeContainer { // Or other valid container types
+					if firstRootInTemplate.Children == nil {
+						firstRootInTemplate.Children = make([]*render.RenderElement, 0, len(kryUsageChildren))
+					}
+					firstRootInTemplate.Children = append(firstRootInTemplate.Children, kryUsageChildren...)
+					for _, kryChild := range kryUsageChildren {
+						kryChild.Parent = firstRootInTemplate
+					}
+				} else {
+					log.Printf("Error expandComponent [%s for %s]: First template root '%s' (Type %X) is not a Container. Cannot append KRY-usage children when slot is missing.",
+						compDefNameStr, instanceElement.SourceElementName, firstRootInTemplate.SourceElementName, firstRootInTemplate.Header.Type)
 				}
 			} else {
-				log.Printf("Error expandComponent '%s': No template root to append KRY-usage children to, and no slot found. KRY children are unparented from this component instance.",
-					instanceElement.SourceElementName)
-				// As a last resort, if instanceElement itself can host children (e.g. is a Container type)
-				// and had no template, one might consider appending KRY children directly to instanceElement.
-				// However, the current logic replaces instanceElement.Children with template roots.
+				log.Printf("Error expandComponent [%s for %s]: No template root to append KRY-usage children to (and no slot '%s' found). KRY children remain unparented from this instance.",
+					instanceElement.SourceElementName, compDefNameStr, childrenSlotIDName)
 			}
 		}
 	}
+
+	log.Printf("Debug expandComponent: Finished expanding '%s' for instance '%s' (GlobalIdx %d). Final nextMasterIndex: %d",
+		compDefNameStr, instanceElement.SourceElementName, instanceElement.OriginalIndex, *nextMasterIndex)
 	return nil
 }
-
-// render/raylib/renderer_processing.go
 
 func (r *RaylibRenderer) PerformLayout(
 	el *render.RenderElement,
@@ -998,9 +979,6 @@ func (r *RaylibRenderer) PerformLayout(
 	if isRootElement {
 		el.RenderW = MuxFloat32(hasExplicitWidth, desiredWidth, parentContentW)
 		el.RenderH = MuxFloat32(hasExplicitHeight, desiredHeight, parentContentH)
-		if isSpecificElementToLog || el.Header.Type == krb.ElemTypeApp {
-			log.Printf("      S2d - Final Size (Root/App) for %s: W:%.1f H:%.1f", elementIdentifier, el.RenderW, el.RenderH)
-		}
 	} else {
 		el.RenderW = MaxF(0, desiredWidth)  // Cannot be negative
 		el.RenderH = MaxF(0, desiredHeight) // Cannot be negative

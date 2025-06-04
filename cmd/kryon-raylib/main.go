@@ -113,7 +113,7 @@ func main() {
 	log.Println("Entering main loop...")
 
 	for !renderer.ShouldClose() {
-		renderer.PollEvents()
+		renderer.PollEventsAndProcessInteractions()
 
 		// Update application state (if any dynamic updates needed per frame)
 

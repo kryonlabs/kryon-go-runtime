@@ -47,6 +47,7 @@ type RenderElement struct {
 	EventHandlers        []EventCallbackInfo
 	DocRef               *krb.Document // Reference to the parsed KRB document
 	SourceElementName    string        // Debug name, usually from KRY id or component name
+	IsExpandedAsNestedComponent bool
 }
 
 type WindowConfig struct {

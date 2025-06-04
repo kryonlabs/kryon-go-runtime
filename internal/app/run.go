@@ -66,7 +66,7 @@ func Run(renderer render.Renderer) {
 
     // --- Main Loop (using the passed-in renderer) ---
     for !renderer.ShouldClose() {
-        renderer.PollEvents()
+        renderer.PollEventsAndProcessInteractions()
         // Add your event handling logic here, potentially calling renderer methods
         // e.g., CheckClick(renderer, roots, ...)
 

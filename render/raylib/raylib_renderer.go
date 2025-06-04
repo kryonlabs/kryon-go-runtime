@@ -161,7 +161,7 @@ func (r *RaylibRenderer) PollEventsAndProcessInteractions() {
 	currentMouseCursor := rl.MouseCursorDefault // Start with default
 
 	isMouseButtonClicked := rl.IsMouseButtonPressed(rl.MouseButtonLeft)
-	clickHandledThisFrame := false            // Ensure only one click is processed per frame globally
+	clickHandledThisFrame := false              // Ensure only one click is processed per frame globally
 	hoveredInteractiveElementThisFrame := false // Flag to ensure cursor is set by the topmost interactive element
 
 	// Iterate in reverse order through all elements in the flat list.
@@ -180,7 +180,9 @@ func (r *RaylibRenderer) PollEventsAndProcessInteractions() {
 		}
 
 		if !el.IsVisible || el.RenderW <= 0 || el.RenderH <= 0 {
-			if isTabButton { log.Printf("DEBUG PollEvents: Tab Button '%s' skipped (not visible or zero size).", el.SourceElementName); }
+			if isTabButton {
+				log.Printf("DEBUG PollEvents: Tab Button '%s' skipped (not visible or zero size).", el.SourceElementName)
+			}
 			continue
 		}
 
@@ -201,13 +203,17 @@ func (r *RaylibRenderer) PollEventsAndProcessInteractions() {
 				if !hoveredInteractiveElementThisFrame {
 					currentMouseCursor = rl.MouseCursorPointingHand
 					hoveredInteractiveElementThisFrame = true // Mark that an interactive element is handling hover
-					if isTabButton { log.Printf("DEBUG PollEvents: Tab Button '%s' set cursor to PointingHand.", el.SourceElementName); }
+					if isTabButton {
+						log.Printf("DEBUG PollEvents: Tab Button '%s' set cursor to PointingHand.", el.SourceElementName)
+					}
 				}
 
 				// Process click ONLY for this topmost interactive element found so far
 				if isMouseButtonClicked && !clickHandledThisFrame {
-					if isTabButton { log.Printf("DEBUG PollEvents: Tab Button '%s' CLICK DETECTED.", el.SourceElementName); }
-					
+					if isTabButton {
+						log.Printf("DEBUG PollEvents: Tab Button '%s' CLICK DETECTED.", el.SourceElementName)
+					}
+
 					eventWasProcessedByCustomHandler := false
 					// Check for custom component event handling first
 					componentID, isCustomInstance := GetCustomPropertyValue(el, componentNameConventionKey, r.docRef)
@@ -249,7 +255,7 @@ func (r *RaylibRenderer) PollEventsAndProcessInteractions() {
 				// from "latest added / potentially topmost child" to "earliest added / root",
 				// this is the one that should get the interaction.
 				// We can break the loop.
-				break 
+				break
 			}
 			// If the element under the mouse is NOT interactive, we do nothing with it
 			// regarding cursor or clicks. We continue the loop, because there might be

@@ -75,7 +75,7 @@ func main() {
 	// --- Main Loop ---
 	log.Println("INFO: Entering main loop...")
 	for !renderer.ShouldClose() {
-		renderer.PollEvents() // Handles input and triggers callbacks
+		renderer.PollEventsAndProcessInteractions() // Handles input and triggers callbacks
 
 		renderer.BeginFrame()
 		renderer.RenderFrame(roots) // Uses the prepared tree
